@@ -1,0 +1,300 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SkyBlock Bazaar — Overnight Flip Leaderboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root {
+      --accent:#0b7dda;
+      --muted:#666;
+      --success:#0a8a3b;
+      --danger:#c0392b;
+      --card:#fff;
+      --bg:#f5f7fb;
+    }
+    body{
+      margin:16px;
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial;
+      background:var(--bg);
+      color:#111;
+    }
+    header{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+    h1{margin:0;font-size:1.25rem}
+    .controls{display:flex;gap:8px;align-items:center;margin-left:auto;flex-wrap:wrap}
+    .card{background:var(--card);border-radius:10px;padding:12px;box-shadow:0 6px 18px rgba(20,30,60,0.06)}
+    label{font-size:.85rem;color:var(--muted)}
+    input[type=number]{width:70px;padding:6px;border-radius:8px;border:1px solid #ddd}
+    button{background:var(--accent);color:#fff;border:none;padding:8px 10px;border-radius:8px;cursor:pointer}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{padding:8px;border-bottom:1px solid #eef2f7;text-align:right;font-variant-numeric:tabular-nums}
+    th.left,td.left{text-align:left}
+    th{background:linear-gradient(180deg,#fbfdff,#f2f6fb);font-weight:600}
+    tr.positive td.profit{color:var(--success);font-weight:700}
+    tr.negative td.profit{color:var(--danger)}
+    .small{font-size:.85rem;color:var(--muted)}
+    .loading{color:var(--muted);font-style:italic}
+    .note{margin-top:8px;color:var(--muted);font-size:.9rem}
+    .nowrap{white-space:nowrap}
+    .tooltip{position:relative}
+    .tooltip:hover::after{content:attr(data-tooltip);position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:4px 8px;border-radius:4px;font-size:.8rem;white-space:nowrap;z-index:10}
+    .stack-64::after{content:"↕️";margin-left:4px}
+    .stack-16::after{content:"↕️";margin-left:4px;font-size:.7rem}
+    .stack-1::after{content:"⚪";margin-left:4px}
+    .stability-high{background:#e8f5e8}
+    .stability-med{background:#fff3cd}
+    .stability-low{background:#f8d7da}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SkyBlock Bazaar — Overnight Flip Leaderboard</h1>
+    <div class="controls card">
+      <div style="display:flex;gap:8px;align-items:center;">
+        <label>Min daily trades</label>
+        <input id="minVolume" type="number" value="5000" min="0" />
+        <label>Trading slots</label>
+        <input id="tradingSlots" type="number" value="8" min="1" max="10" />
+        <label>Inv space</label>
+        <input id="invSpace" type="number" value="200" min="50" max="400" />
+      </div>
+      <button id="refreshBtn">Refresh</button>
+    </div>
+  </header>
+
+  <div class="card" id="content">
+    <div id="status" class="loading">Loading bazaar &amp; items... (this may take 1–3s)</div>
+
+    <table id="leaderboard" style="display:none">
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th class="left">Item</th>
+          <th>Buy</th>
+          <th>Sell</th>
+          <th>Vol</th>
+          <th class="tooltip" data-tooltip="25% vol × slots × stack × stability">Overnight qty</th>
+          <th class="tooltip" data-tooltip="Price change tolerance">Stability</th>
+          <th class="profit">Est profit</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <div class="note">
+      <strong>Overnight Flip Reality:</strong><br>
+      <strong>Overnight qty</strong> = min(25% vol, slots×stack, inv) × **stability_factor**<br>
+      <strong>Stability</strong>: High=90% (↗️) | Med=50% (➡️) | Low=10% (↘️)<br>
+      <strong>Est profit</strong> = Overnight qty × (buy-sell) **← SORTED BY THIS**<br>
+      **Filters**: ≥ min trades, profitable, stable enough to flip overnight
+    </div>
+  </div>
+
+  <script>
+  const BAZAAR_URL = 'https://api.hypixel.net/v2/skyblock/bazaar';
+  const ITEMS_URL  = 'https://api.hypixel.net/resources/skyblock/items';
+  const VOLUME_PERCENTAGE = 0.25;
+
+  // Stack size detection
+  function getStackSize(itemData) {
+    if (!itemData) return 64;
+    const stackSize = itemData.stackSize || 64;
+    const nonStackables = ['SUPERIUM_SWORD', 'HYPERION', 'VORPAL_SWORD', 'ASPECT_OF_THE_END'];
+    if (nonStackables.includes(itemData.id)) return 1;
+    if (stackSize === 1) return 1;
+    if (stackSize === 16) return 16;
+    return 64;
+  }
+
+  // PRICE STABILITY ANALYSIS - THE KEY!
+  function getStabilityFactor(product, quickStatus) {
+    if (!quickStatus) return 0.1; // Default low
+    
+    const qs = quickStatus;
+    
+    // Get 24h volume (buy + sell)
+    const vol24h = (qs.buyVolume || 0) + (qs.sellVolume || 0);
+    
+    // Get price spread (volatility indicator)
+    const spread = Math.abs((qs.buyPrice || 0) - (qs.sellPrice || 0));
+    const avgPrice = (qs.buyPrice + qs.sellPrice) / 2;
+    const spreadPercent = avgPrice > 0 ? (spread / avgPrice) : 0;
+    
+    // High volume = more stable
+    const volumeStability = Math.min(vol24h / 10000, 1); // Cap at 10k vol
+    
+    // Low spread = more stable  
+    const spreadStability = 1 - Math.min(spreadPercent * 10, 1);
+    
+    // Overall stability (0-1)
+    const stability = (volumeStability * 0.6 + spreadStability * 0.4);
+    
+    // Categorize
+    if (stability >= 0.8) return { factor: 0.9, level: 'high' };
+    if (stability >= 0.4) return { factor: 0.5, level: 'med' };
+    return { factor: 0.1, level: 'low' };
+  }
+
+  async function fetchJsonWithFallback(url) {
+    try {
+      const r = await fetch(url, {cache: 'no-cache'});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    } catch (err) {
+      const proxy = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
+      const r2 = await fetch(proxy, {cache: 'no-cache'});
+      if (!r2.ok) throw new Error('Proxy HTTP ' + r2.status);
+      return await r2.json();
+    }
+  }
+
+  const statusEl = document.getElementById('status');
+  const tableEl = document.getElementById('leaderboard');
+  const tbody = tableEl.querySelector('tbody');
+  const refreshBtn = document.getElementById('refreshBtn');
+
+  async function build() {
+    const minDaily = Number(document.getElementById('minVolume').value) || 5000;
+    const tradingSlots = Number(document.getElementById('tradingSlots').value) || 8;
+    const invSpace = Number(document.getElementById('invSpace').value) || 200;
+
+    statusEl.textContent = 'Fetching Bazaar data...';
+    tableEl.style.display = 'none';
+    tbody.innerHTML = '';
+
+    let bazaarData, itemsData;
+    try {
+      [bazaarData, itemsData] = await Promise.all([
+        fetchJsonWithFallback(BAZAAR_URL),
+        fetchJsonWithFallback(ITEMS_URL)
+      ]);
+    } catch (err) {
+      console.error(err);
+      statusEl.textContent = 'Failed to fetch API — see console for details.';
+      return;
+    }
+
+    if (!bazaarData?.products || !itemsData?.items) {
+      statusEl.textContent = 'Missing data from API.';
+      return;
+    }
+
+    statusEl.textContent = 'Analyzing price stability for overnight flips...';
+    const itemsMap = new Map(itemsData.items.map(it => [it.id, it]));
+    const results = [];
+
+    for (const [key, p] of Object.entries(bazaarData.products)) {
+      const qs = p.quick_status || {};
+      const buyPrice = typeof qs.buyPrice === 'number' && qs.buyPrice > 0 ? qs.buyPrice : (p.buy_summary?.[0]?.pricePerUnit ?? null);
+      const sellPrice = typeof qs.sellPrice === 'number' && qs.sellPrice > 0 ? qs.sellPrice : (p.sell_summary?.[0]?.pricePerUnit ?? null);
+
+      const buyMovingWeek = Number(qs.buyMovingWeek ?? 0);
+      const sellMovingWeek = Number(qs.sellMovingWeek ?? 0);
+      const weeklyMoving = Math.max(buyMovingWeek, sellMovingWeek);
+      const dailyMoving = weeklyMoving / 7;
+
+      const buyMax = Number(p.amount || 0);
+      const itemData = itemsMap.get(key);
+
+      // Skip bad data
+      if (!buyPrice || !sellPrice || buyPrice <= 0 || sellPrice <= 0) continue;
+      if (dailyMoving < minDaily) continue;
+
+      const stackSize = getStackSize(itemData);
+      
+      // 🎯 PRICE STABILITY ANALYSIS
+      const stability = getStabilityFactor(p, qs);
+      
+      // Skip UNSTABLE items (can't flip overnight)
+      if (stability.level === 'low') continue;
+
+      // Base limits
+      const volumeLimit = Math.floor(dailyMoving * VOLUME_PERCENTAGE);
+      const slotLimit = tradingSlots * stackSize;
+      const apiLimit = buyMax > 0 ? buyMax : volumeLimit;
+      
+      // ✅ OVERNIGHT QUANTITY = Base × Stability Factor
+      const baseQty = Math.min(volumeLimit, slotLimit, apiLimit, invSpace);
+      const overnightQty = Math.floor(baseQty * stability.factor);
+      
+      if (overnightQty <= 0) continue;
+
+      const profitPercent = ((buyPrice - sellPrice) / sellPrice) * 100;
+      const estProfit = overnightQty * (buyPrice - sellPrice);
+      
+      if (profitPercent <= 0) continue;
+
+      results.push({
+        id: key,
+        name: itemData?.name ?? key,
+        buyPrice,
+        sellPrice,
+        dailyMoving,
+        overnightQty,
+        profitPercent,
+        estProfit,
+        buyMax: buyMax > 0 ? buyMax : null,
+        stackSize,
+        stabilityLevel: stability.level,
+        stabilityFactor: stability.factor
+      });
+    }
+
+    // ✅ Sort by ESTIMATED OVERNIGHT PROFIT
+    results.sort((a, b) => b.estProfit - a.estProfit);
+
+    if (!results.length) {
+      statusEl.textContent = 'No stable overnight flips found.';
+      return;
+    }
+
+    const nf = x => Number.isFinite(x) ? x.toLocaleString(undefined, {maximumFractionDigits:2}) : '-';
+    const pf = x => Number.isFinite(x) ? x.toFixed(2) + '%' : '-';
+    
+    results.slice(0, 200).forEach((r, idx) => {
+      const tr = document.createElement('tr');
+      tr.className = `positive stability-${r.stabilityLevel}`;
+      
+      const stackClass = r.stackSize === 64 ? 'stack-64' : 
+                        r.stackSize === 16 ? 'stack-16' : 'stack-1';
+      
+      const stabilityIcon = r.stabilityLevel === 'high' ? '↗️' : 
+                           r.stabilityLevel === 'med' ? '➡️' : '↘️';
+      
+      const qtyDisplay = r.buyMax && r.buyMax < r.overnightQty 
+        ? `${r.overnightQty} (max:${nf(r.buyMax)})` 
+        : r.overnightQty.toLocaleString();
+      
+      tr.innerHTML = `
+        <td class="nowrap">${idx+1}</td>
+        <td class="left">
+          <div style="display:flex;flex-direction:column;">
+            <span style="font-weight:600">${escapeHtml(r.name)} <span class="${stackClass}"></span></span>
+            <span class="small">${escapeHtml(r.id)}</span>
+          </div>
+        </td>
+        <td>${nf(r.buyPrice)}</td>
+        <td>${nf(r.sellPrice)}</td>
+        <td>${Math.round(r.dailyMoving).toLocaleString()}</td>
+        <td class="nowrap ${stackClass}">${qtyDisplay}</td>
+        <td>${stabilityIcon}</td>
+        <td class="profit">${nf(r.estProfit)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    statusEl.textContent = `Showing ${results.length} STABLE overnight flips | Slots:${tradingSlots} | Inv:${invSpace} | Top ${Math.min(results.length,200)} by PROFIT | ${new Date().toLocaleString()}`;
+    tableEl.style.display = '';
+  }
+
+  function escapeHtml(s) { 
+    return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); 
+  }
+
+  refreshBtn.addEventListener('click', build);
+  build();
+  </script>
+
+</body>
+</html>
