@@ -223,7 +223,7 @@
       const profitPercent = ((buyPrice - sellPrice) / sellPrice) * 100;
       const estProfit = overnightQty * (buyPrice - sellPrice);
       
-      if (profitPercent <= 0) continue;
+      if (profitPercent <= 30) continue;
 
       results.push({
         id: key,
